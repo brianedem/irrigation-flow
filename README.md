@@ -5,5 +5,5 @@ In addition to fault detection, the application will also track water use by zon
 
 The irrigation system is managed by a Rachio irrigation controller, which provides notification of state changes via webhooks. These notifications will be forwarded to the application via an ngrok agent.
 
-Water use monitored by a TUF-2000B ultrasonic flow meter. Registers reporting water usage and flow are available via its RS485 interface, which is bridged to the local network.
+Water use monitored by a TUF-2000B ultrasonic flow meter manufactured by Dalian Taosonics Instrument Co. Registers reporting water usage and flow are available via its RS485 interface, which is bridged to the local network.
 
