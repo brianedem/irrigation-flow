@@ -27,7 +27,7 @@ config = configparser.ConfigParser()
 config.read('config.ini')
 
 log = logging.getLogger(__name__)
-logging.basicConfig(format='%(asctime)s %(message)s', level=logging.DEBUG)
+logging.basicConfig(format='%(asctime)s %(filename)s %(message)s', level=logging.DEBUG)
 # check that water meter information is in the configuration
 if 'WATERMETER' not in config.sections():
     exit('WATERMETER section missing from config.ini')
@@ -126,7 +126,7 @@ for vid in zone_info:
 #   print(zone_info[vid])
     valve = zone_info[vid]['valve']
     zones[valve] = valve_state(vid, zone_info[vid]['name'])
-    print(f'{valve}: {vid} {zone_info[vid]['name']}')
+    log.info(f'{valve}: {vid} {zone_info[vid]['name']}')
 
 # Event queue for webhook and flow measurement callback
 event_queue = queue.Queue()
@@ -175,6 +175,12 @@ class PostHandler(BaseHTTPRequestHandler):
 
         event_queue.put((EVENTTYPE.WEBHOOK, data))
 
+    # redefine the log functions as they write directly to stderr
+    def log_error(s, format, *args):
+        log.error(format, *args)
+    def log_message(s, format, *args):  # used by log_request() and log_error()
+        log.info(format, *args)
+        
 # start up the web server in a separate thread
 httpd = HTTPServer(('', local_port), PostHandler)
 print(f'Listening on {local_addr}')
@@ -192,13 +198,13 @@ url = public_url + webhook_path
 try:
     while True:
         q = event_queue.get()
-        pprint.pp(q)
+        log.info('%s', pprint.pformat(q))
         etype, data = q
         if etype is EVENTTYPE.WEBHOOK:
 #           pprint.pp(data)
             eventType = data['eventType']
             if "DEVICE_ZONE_RUN" not in eventType:
-                print(f'ignoring {eventType}')
+                log.warning(f'ignoring {eventType}')
                 continue
             eventId = data['eventId']
             payload = data['payload']
@@ -208,31 +214,31 @@ try:
             # read the water usage meter
             meter_data = water_meter.read_meter(wm_name)
 #           meter_data = water_meter.read_meter('192.168.1.190')
-            pprint.pp(meter_data)
+            log.info('%s', pprint.pformat(meter_data))
 
             if zone.valve_open:
                 if "STARTED" in eventType:
-                    print(f'Valve {zoneNumber} started - ignored, valve already open')
+                    log.info('Valve %d started - ignored, valve already open', zoneNumber)
                     continue
                 zone.valve_open = False
-                usage = zone.usage + meter_data['accumulated'] - zone.start_usage
+                usage = zone.usage + meter_data['accumulated'] - zone.meter_start
                 if "PAUSED" in eventType:
-                    print(f'Valve {zoneNumber} paused')
+                    log.info('Valve %d paused', zoneNumber)
                     zone.usage = usage
                     continue
                 elif "COMPLETED" in eventType:
-                    print(f'Valve {zoneNumber} completed - {usage}cf, {zone.flow}gmp')
+                    log.info('Valve %d completed - %dcf, %sgpm', zoneNumber, usage, f'{zone.flow}')
                 elif "STOPPED" in eventType:
-                    print(f'Valve {zoneNumber} stopped - {usage}cf, {zone.flow}gpm')
+                    log.info(f'Valve %d stopped - %dcf, %sgpm', zoneNumber, usage, f'{zone.flow}')
                 else:
-                    print(f'Unknown {eventType}')
+                    log.warning(f'Unknown {eventType}')
                 # TODO need to log data collected
                 # time/date, zone, flow, usage, runtime
                 zone.usage = 0
                 zone.flow = None
             else:
                 if "STARTED" in eventType:
-                    print(f'Valve {zoneNumber} started')
+                    log.info(f'Valve {zoneNumber} started')
                     zone.valve_open = True
                     zone.meter_start = meter_data['accumulated']
                     zone.startId = eventId
@@ -244,18 +250,18 @@ try:
         elif etype is EVENTTYPE.FLOW_TIMER:
             # TODO valve event is slow relative to local reading of meter, so flow reading could be off
             # if the valve was turned off ~20s after STARTED
-            pprint.pp(data)
+            log.info('%s', pprint.pformat(data))
             zoneNumber, timerId = data
             zone = zones[zoneNumber]
             if not zone.valve_open or zone.startId != timerId:
                 continue
             meter_data = water_meter.read_meter('192.168.1.190')
-            pprint.pp(meter_data)
+            log.info('%s', pprint.pformat(meter_data))
             zone.flow = meter_data['flow']
 
 
         else:
-            print(f'Unknown event {etype}')
+            log.warning(f'Unknown event {etype}')
 
 except KeyboardInterrupt:
     pass
