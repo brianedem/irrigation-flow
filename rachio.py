@@ -12,7 +12,7 @@ import json
 public_rachio = 'https://api.rach.io/1/public/person' 
 cloud_rachio = 'https://cloud-rest.rach.io'
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 class rachio():
     def __init__(self, APIkey, device_name):
@@ -29,7 +29,7 @@ class rachio():
             exit(f'Error: no response from {site} while retrieving public/person/info structure')
 #       print(r.json())
         self.userId = r.json()['id']
-        logger.info(f'userId: {self.userId}')
+        log.info(f'user ID: {self.userId}')
 
         # use the userId to get all of the other IDs associated with zones, schedules, etc
         try:
@@ -50,6 +50,7 @@ class rachio():
         else:
             raise Exception(f"Controller {device_device} was not found")
         self.device = d
+        log.info(f'controller ID: {d['id']}')
 
     def get_zones(self):
 
@@ -62,25 +63,57 @@ class rachio():
         # sort result by zone number
         return dict(sorted(zones.items(), key=lambda item: item[1]['valve']))
 
+    # creates webhook for target_url if not present
     def add_device_zone_run_webhook(self, target_url):
 
-        url = '/'.join((cloud_rachio, 'webhook/createWebhook')),
+        # check for existing webhook
+        webhooks = self.list_webhooks()
+        for hook in webhooks:
+            if 'DEVICE_ZONE_RUN_' not in ' '.join(hook['eventTypes']):
+                continue
+            if hook['url'] == target_url:
+                log.info(f'Webhook to {target_url} exists')
+                return
+            exit(f"Error - existing webhook already allocated to {hook['url']}")
+
+        # create the webhook
+        site = '{}/{}'.format(cloud_rachio, 'webhook/createWebhook')
         headers = self.authorization | {
             "accept": "application/json",
             "content-type": "application/json",
         }
         payload = {
-            "resource_id": { "irrigation_controller_id": self.device['id'] },
+            "resource_id": {
+                "irrigation_controller_id": self.device['id']
+            },
             "url": target_url,
-            "event_types": ["DEVICE_ZONE_RUN_STARTED_EVENT", "DEVICE_ZONE_RUN_PAUSED_EVENT", "DEVICE_ZONE_RUN_STOPPED_EVENT", "DEVICE_ZONE_RUN_COMPLETED_EVENT"],
+            "event_types": [
+                "DEVICE_ZONE_RUN_STARTED_EVENT",
+                "DEVICE_ZONE_RUN_PAUSED_EVENT",
+                "DEVICE_ZONE_RUN_STOPPED_EVENT",
+                "DEVICE_ZONE_RUN_COMPLETED_EVENT"
+            ],
         }
-        if True:
-            print(f'Posting to {url}:')
-            pprint.pp(headers, payload)
-        else:
-            response = requests.post(url, json=payload, headers=headers)
+#       pprint.pp(headers, payload)
+        response = requests.post(site, json=payload, headers=headers)
+        log.debug(response.text)
 
-            logger.debug(response.text)
+    def list_webhooks(self):
+        url = '{}/webhook/listWebhooks?resource_id.irrigation_controller_id={}'.format(cloud_rachio, self.device['id'])
+        headers = self.authorization | {
+            "accept": "application/json",
+        }
+        try:
+            response = requests.get(url, headers=headers)
+        except requests.exceptions.ReadTimeout:
+            exit(f'Error: GET request to {url} timed out')
+
+        try:
+            webhooks = response.json()['webhooks']
+        except:
+            exit('Data format error in listWebhooks response data')
+
+        return webhooks
 
     def delete_webhooks(self):
         action = f"webhook/deleteAllWebhooks?resource_id.irrigation_controller_id={self.device['id']}"
@@ -89,7 +122,7 @@ class rachio():
 
         response = requests.delete('/'.join((cloud_rachio, action)), headers=headers)
         
-        logger.debug(response.text)
+        log.debug(response.text)
 
 if __name__ == '__main__':
     import argparse

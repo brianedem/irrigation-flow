@@ -183,13 +183,13 @@ class PostHandler(BaseHTTPRequestHandler):
         
 # start up the web server in a separate thread
 httpd = HTTPServer(('', local_port), PostHandler)
-print(f'Listening on {local_addr}')
+log.info('Webhook web server listening on %s', local_addr)
 server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
 server_thread.start()
 
 # install webhooks at Rachio
 url = public_url + webhook_path
-#add_device_zone_run_webhook(url)   # TODO
+controller.add_device_zone_run_webhook(url)
 
 # capture daily water usage
 # TODO daily at midnight push request on queue to record water meter value
