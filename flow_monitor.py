@@ -1,3 +1,4 @@
+import argparse
 import configparser
 import logging
 import socket
@@ -22,8 +23,30 @@ import enum
 # - network tunnel (local app communicates with edge proxy, such as cloudflare or ngrok)
 # For this implementation ngrok will be used as it requires the minimal amount of configuration.
 # ngrok can be set up as a background service - see https://ngrok.com/docs/agent#running-ngrok-in-the-background
-#
+
+# process command line arguments
+app_description = \
+'''This application reports excess irrigation water usage.
+
+Water flow rates are monitored per zone, and flow rates exceeding the zone
+threshold generate a notification.
+
+Water usage while the system is idle will also generate a notification.
+
+Notifications are generated using ntfy, which can be received on a moble phone.
+
+A config.ini file is used to establish network addresses and application keys
+for accessing the irrigation controller, the water meter, and the notification
+service.
+'''
+parser = argparse.ArgumentParser(
+                    prog=__name__,
+                    description=__doc__)
+parser.add_argument('-t', '--test', type=str)
+
+# read configuration
 config = configparser.ConfigParser()
+config.read(os.path.expanduser('~/.ntfy'))
 config.read('config.ini')
 
 log = logging.getLogger(__name__)
@@ -113,7 +136,7 @@ controller = rachio.rachio(rc['APIkey'], rc['Name'])
 class valve_state:
     def __init__(self, valve_id, valve_name):
         self.valve_open = False
-        self.meter_start = None
+        self.meter_start_value = None
         self.flow_timer = None
         self.flow = None
         self.usage = 0
@@ -130,11 +153,9 @@ for vid in zone_info:
 
 # Event queue for webhook and flow measurement callback
 event_queue = queue.Queue()
-class EVENTTYPE(enum.Enum):
-    WEBHOOK = 1
-    FLOW_TIMER = 2
-    LEAK_TIMER = 3
-    DAY_TIMER = 4
+class EVENT_TYPE(enum.Enum):
+    WEBHOOK = 1     # received webhook POST message
+    FLOW_TIMER = 2  # callback from webhook START message
 
 # create a random string for the webhook path on the server
 #webhook_path = f'/rachio/{uuid.uuid4()}'
@@ -173,7 +194,7 @@ class PostHandler(BaseHTTPRequestHandler):
         s.end_headers()
         s.wfile.write('OK'.encode('utf-8'))
 
-        event_queue.put((EVENTTYPE.WEBHOOK, data))
+        event_queue.put((EVENT_TYPE.WEBHOOK, data))
 
     # redefine the log functions as they write directly to stderr
     def log_error(s, format, *args):
@@ -188,11 +209,62 @@ server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
 server_thread.start()
 
 # install webhooks at Rachio
-url = public_url + webhook_path
-controller.add_device_zone_run_webhook(url)
+webhook_url = public_url + webhook_path
+controller.add_device_zone_run_webhook(webhook_url)
 
-# capture daily water usage
-# TODO daily at midnight push request on queue to record water meter value
+# every night check for leaks over an hour interval, record daily water usage,
+# and test the webhook mechanism
+test_message_received = threading.Event()
+test_path = '/test.json'
+def leak_check():
+    while True:
+        # wait until 2300 hours when system will be idle
+        now = datetime.now()
+        target_time = now.replace(hours=23,minutes=0,seconds=0,microseconds=0)
+        if target_time < now:
+            target_time += datetime.timedelta(days=1)
+        time.sleep((target_time - now).seconds)
+
+        # make two water meter readings one hour apart
+        start_reading = water_meter.read_meter(wm_name)
+        log.info('First leak test meter reading: %s', pprint.pformat(start_reading))
+        time.sleep(60*60)
+        end_reading = water_meter.read_meter(wm_name)
+        log.info('Second leak test meter reading: %s', pprint.pformat(end_reading))
+
+        # check for water usage (leakage)
+        start_value = start_reading.get('accumulated', None)
+        end_value = end_reading.get('accumulated', None)
+        if start_reading is None:
+            leakage = None
+        elif end_reading is None:
+            leakage = None
+        else:
+            leakage = end_value - start_value
+        if leakage and leakage > 0.1:
+            log.error('One hour leakage of %0.3f detected', leakage)
+            if topic := config.get('NTFY', 'Topic', fallback=None):
+                requests.post(f'https://ntfy.sh/{topic}',
+                    data='Irrigation leak detected'.encode(encoding='utf-8'))
+
+        if end_leakage is not None:
+            # TODO log end meter reading to database
+            pass
+
+        # POST test message to public webhook site
+        test_url = public_url + test_path
+        headers = {"content-type": "application/json"}
+        payload = {"eventType": "WEBHOOK_TEST"}
+        response = requests.post(test_url, json=payload, headers=headers)
+        log.debug(response.text)
+
+        # wait for indication that test message was received
+        if not test_message_received.wait(timeout=10):
+            log.error('failed to receive daily test message')
+            # send a ntfy message of the failure
+
+# start up the leak_check in its own thread
+test_thread = threading.Thread(target=leak_check, daemon=True)
 
 # process events from queue
 try:
@@ -200,9 +272,13 @@ try:
         q = event_queue.get()
         log.info('%s', pprint.pformat(q))
         etype, data = q
-        if etype is EVENTTYPE.WEBHOOK:
-#           pprint.pp(data)
+        if etype is EVENT_TYPE.WEBHOOK:
+
+            # decode the message and verify type
             eventType = data['eventType']
+            if "WEBHOOK_TEST" in eventType:     # private type to test webhook forwarding
+                test_message_received.set()
+                continue
             if "DEVICE_ZONE_RUN" not in eventType:
                 log.warning(f'ignoring {eventType}')
                 continue
@@ -213,52 +289,84 @@ try:
 
             # read the water usage meter
             meter_data = water_meter.read_meter(wm_name)
-#           meter_data = water_meter.read_meter('192.168.1.190')
-            log.info('%s', pprint.pformat(meter_data))
+            log.info('Water meter reading at webhook: %s', pprint.pformat(meter_data))
 
             if zone.valve_open:
                 if "STARTED" in eventType:
-                    log.info('Valve %d started - ignored, valve already open', zoneNumber)
+                    log.info('Valve %d START - ignored, valve already open', zoneNumber)
                     continue
                 zone.valve_open = False
-                usage = zone.usage + meter_data['accumulated'] - zone.meter_start
-                if "PAUSED" in eventType:
+
+                # eventType is PAUSED/STOPPED/COMPLETED
+
+                # determine water usage - None if any readings failed
+                meter_end_value = meter_data.get('accumulated', None)
+                if zone.usage is None:
+                    usage = None
+                elif zone.meter_start_value is None:
+                    usage = None
+                elif meter_end_value is None:
+                    usage = None
+                else:
+                    usage = zone.usage + meter_end_value - zone.meter_start_value
+
+                if "PAUSED" in eventType:       # operator has paused the zone, to be STARTED later
                     log.info('Valve %d paused', zoneNumber)
                     zone.usage = usage
                     continue
-                elif "COMPLETED" in eventType:
-                    log.info('Valve %d completed - %dcf, %sgpm', zoneNumber, usage, f'{zone.flow}')
-                elif "STOPPED" in eventType:
-                    log.info(f'Valve %d stopped - %dcf, %sgpm', zoneNumber, usage, f'{zone.flow}')
-                else:
-                    log.warning(f'Unknown {eventType}')
+
                 # TODO need to log data collected
                 # time/date, zone, flow, usage, runtime
+
+                # reformat data for logging/messages
+                if usage is None:
+                    usage = 'unknown usage'
+                else:
+                    usage = f'{usage:.2f} cf'
+                if zone.flow is None:
+                    flow = 'unknown flow'
+                else:
+                    flow = f'{zone.flow:.2f} gpm'
+
+                # log the event
+                if "STOPPED" in eventType:    # operator has stopped the zone
+                    log.info(f'Valve %d stopped - %s, %s', zoneNumber, usage, f'{flow}')
+                elif "COMPLETED" in eventType:  # zone schedule has run to completion
+                    log.info('Valve %d completed - %s, %s', zoneNumber, usage, f'{flow}')
+                else:
+                    log.warning(f'Unknown {eventType}')
+
+                # reset zone values
                 zone.usage = 0
                 zone.flow = None
+
             else:
                 if "STARTED" in eventType:
                     log.info(f'Valve {zoneNumber} started')
                     zone.valve_open = True
-                    zone.meter_start = meter_data['accumulated']
+                    zone.meter_start_value = meter_data.get('accumulated', None)
                     zone.startId = eventId
                     # wait for line pressure to equalize before reading flow rate
                     if zone.flow is None:
-                        args = ((EVENTTYPE.FLOW_TIMER, (zoneNumber,eventId)),)
+                        args = ((EVENT_TYPE.FLOW_TIMER, (zoneNumber,eventId)),)
                         zone.timer = threading.Timer(20, event_queue.put, args=args)
                         zone.timer.start()
-        elif etype is EVENTTYPE.FLOW_TIMER:
-            # TODO valve event is slow relative to local reading of meter, so flow reading could be off
-            # if the valve was turned off ~20s after STARTED
-            log.info('%s', pprint.pformat(data))
+                else:
+                    log.info('Valve %d is not open - ignoring %s', zoneNumber, eventType)
+
+        elif etype is EVENT_TYPE.FLOW_TIMER:
+            # the delay in receiving zone notifications could result in reading the
+            # meter either after the valve has closed or has switched to another
+            # zone. This is unlikely as the flow measurement is made 20 seconds into
+            # the irrigation cycle, which will probably only occur on the ending
+            # cycle of a zone using the 'soak' feature
             zoneNumber, timerId = data
             zone = zones[zoneNumber]
             if not zone.valve_open or zone.startId != timerId:
                 continue
-            meter_data = water_meter.read_meter('192.168.1.190')
+            meter_data = water_meter.read_meter(wm_name)
             log.info('%s', pprint.pformat(meter_data))
             zone.flow = meter_data['flow']
-
 
         else:
             log.warning(f'Unknown event {etype}')

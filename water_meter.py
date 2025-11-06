@@ -1,16 +1,22 @@
+import logging
 import requests
+
+log = logging.getLogger(__name__)
 
 def read_meter(name):
     site = f'http://{name}/data.json'
     try:
         r = requests.get(site, timeout=5)
-    except:
-        exit(f'Error: GET request to {site} failed')
+        r.raise_for_status()
+    except requests.exceptions.RequestException:
+        log.error('GET %s failed', site)
+        return {}
 
     try:
         data = r.json()
     except:
-        exit(f'Error: Data format error in {site} response')
+        log.error('Data format error in response from %s', site)
+        return {}
 
 #   print(data)
     return data
