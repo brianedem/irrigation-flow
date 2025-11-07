@@ -45,7 +45,9 @@ service.
 parser = argparse.ArgumentParser(
                     prog=__name__,
                     description=__doc__)
-parser.add_argument('-t', '--test', type=str)
+parser.add_argument('--leak_test', action='store_true')
+args = parser.parse_args()
+
 
 ################################################################################
 # read configuration
@@ -266,15 +268,13 @@ def leak_check(test=False):
         else:
             leakage = end_value - start_value
         log.debug('Leakage was %f', leakage)
+
+        # send ntfy message of leak
         if leakage and leakage > 0.1:
             log.error('One hour leakage of %0.3f detected', leakage)
             if topic := config.get('NTFY', 'Topic', fallback=None):
                 requests.post(f'https://ntfy.sh/{topic}',
                     data='Irrigation leak detected'.encode(encoding='utf-8'))
-
-        if end_value is not None:
-            # TODO send ntfy message of leak
-            pass
 
         # log daily meter reading to database
         if end_value is not None:
@@ -287,13 +287,15 @@ def leak_check(test=False):
         response = requests.post(webhook_url, json=payload, headers=headers)
         log.debug(response.text)
 
-        # wait for indication that test message was received
+        # send a ntfy message if message not received
         if not test_message_received.wait(timeout=10):
             log.error('failed to receive daily test message')
-            # TODO send a ntfy message of the failure
+            if topic := config.get('NTFY', 'Topic', fallback=None):
+                requests.post(f'https://ntfy.sh/{topic}',
+                    data='Irrigation webhook test failed'.encode(encoding='utf-8'))
 
 # start up the leak_check in its own thread
-leak_thread = threading.Thread(target=leak_check, args=(True,), daemon=True)
+leak_thread = threading.Thread(target=leak_check, args=(args.leak_test,), daemon=True)
 leak_thread.start()
 
 ################################################################################
@@ -346,11 +348,9 @@ try:
                     zone.usage = usage
                     continue
 
-                # TODO need to log data collected
+                # log data collected
                 point = Point("usage").tag("zone", str(zoneNumber)).field("usage", usage).field("flow", zone.flow)
                 client.write(record=point, write_procesion="s")
-
-                # time/date, zone, flow, usage, runtime
 
                 # reformat data for logging/messages
                 if usage is None:
