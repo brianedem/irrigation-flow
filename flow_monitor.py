@@ -27,6 +27,7 @@ import water_meter
 # For this implementation ngrok will be used as it requires the minimal amount of configuration.
 # ngrok can be set up as a background service - see https://ngrok.com/docs/agent#running-ngrok-in-the-background
 
+################################################################################
 # process command line arguments
 app_description = \
 '''This application reports excess irrigation water usage.
@@ -47,7 +48,6 @@ parser = argparse.ArgumentParser(
                     description=__doc__)
 parser.add_argument('--leak_test', action='store_true')
 args = parser.parse_args()
-
 
 ################################################################################
 # read configuration
@@ -234,6 +234,13 @@ database = "irrigation"
 client = InfluxDBClient3(host=host, token=token, database=database)
 
 ################################################################################
+def send_notification(message):
+    if topic := config.get('NTFY', 'Topic', fallback=None):
+        try:
+            requests.post(f'https://ntfy.sh/{topic}', data=message.encode(encoding='utf-8'))
+        except:
+            log.error('send_notification() failed')
+################################################################################
 # every night check for leaks over an hour interval, record daily water usage,
 # and test the webhook mechanism
 test_message_received = threading.Event()
@@ -272,9 +279,7 @@ def leak_check(test=False):
         # send ntfy message of leak
         if leakage and leakage > 0.1:
             log.error('One hour leakage of %0.3f detected', leakage)
-            if topic := config.get('NTFY', 'Topic', fallback=None):
-                requests.post(f'https://ntfy.sh/{topic}',
-                    data='Irrigation leak detected'.encode(encoding='utf-8'))
+            send_notification('Irrigation leak detected')
 
         # log daily meter reading to database
         if end_value is not None:
@@ -290,9 +295,7 @@ def leak_check(test=False):
         # send a ntfy message if message not received
         if not test_message_received.wait(timeout=10):
             log.error('failed to receive daily test message')
-            if topic := config.get('NTFY', 'Topic', fallback=None):
-                requests.post(f'https://ntfy.sh/{topic}',
-                    data='Irrigation webhook test failed'.encode(encoding='utf-8'))
+            send_notification('Irrigation webhook test failed')
 
 # start up the leak_check in its own thread
 leak_thread = threading.Thread(target=leak_check, args=(args.leak_test,), daemon=True)
@@ -374,7 +377,7 @@ try:
                 zone.usage = 0
                 zone.flow = None
 
-            else:
+            else:   # valve is closed
                 if "STARTED" in eventType:
                     log.info(f'Valve {zoneNumber} started')
                     zone.valve_open = True
@@ -401,7 +404,9 @@ try:
             meter_data = water_meter.read_meter(wm_name)
             log.info('%s', pprint.pformat(meter_data))
             zone.flow = meter_data['flow']
-
+            flow_limit = config.get('FLOW', 'str(zoneNumber)', fallback=None) 
+            if flow_limit and zone.flow > flow_limit:
+                send_notification('Irrigation leak detected')
         else:
             log.warning(f'Unknown event {etype}')
 
