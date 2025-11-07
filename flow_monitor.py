@@ -1,20 +1,23 @@
 import argparse
 import configparser
 import logging
+import pprint
 import socket
 import platform
 import os
 import subprocess
 import requests
 import rachio
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import pprint
-import json
-import uuid
-import threading
 import queue
-import water_meter
+import uuid
 import enum
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+import threading
+from influxdb_client_3 import InfluxDBClient3, Point
+import datetime
+import time
+import water_meter
 
 # As the webhook mechanism requires a public interface, an additional external mechanism must be set
 # up to forward the notification to a system behind a NAT router. This mechanism could be one of the
@@ -44,6 +47,7 @@ parser = argparse.ArgumentParser(
                     description=__doc__)
 parser.add_argument('-t', '--test', type=str)
 
+################################################################################
 # read configuration
 config = configparser.ConfigParser()
 config.read(os.path.expanduser('~/.ntfy'))
@@ -56,6 +60,7 @@ if 'WATERMETER' not in config.sections():
     exit('WATERMETER section missing from config.ini')
 wm_name = config['WATERMETER']['name']
 
+################################################################################
 # check to see if the host is able to determine the IP address of the water meter
 for domain in ('', '.attlocal.net', '.local'):
     wm_path = wm_name + domain
@@ -111,6 +116,7 @@ else:
         exit(f'Error: unable to determine IP address of water meter {wm_name}')
 log.debug(f'water meter at {wm_name}')
 
+################################################################################
 # verify ngrok tunnel is up and determine the public endpoint url
 try:
     ngrok = requests.get('http://localhost:4040/api/tunnels')
@@ -125,6 +131,7 @@ local_addr = tunnel0['config']['addr']
 local_port = int(local_addr.split(':')[-1])
 #print(public_url)
 
+################################################################################
 # determine the rachio valve mapping
 if 'RACHIO' not in config.sections():
     exit('RACHIO section missing from config.ini')
@@ -132,6 +139,7 @@ if 'RACHIO' not in config.sections():
 rc = config['RACHIO']
 controller = rachio.rachio(rc['APIkey'], rc['Name'])
 
+################################################################################
 # set up state variables for each valve
 class valve_state:
     def __init__(self, valve_id, valve_name):
@@ -151,7 +159,8 @@ for vid in zone_info:
     zones[valve] = valve_state(vid, zone_info[vid]['name'])
     log.info(f'{valve}: {vid} {zone_info[vid]['name']}')
 
-# Event queue for webhook and flow measurement callback
+################################################################################
+# create event queue for webhook and flow measurement callback
 event_queue = queue.Queue()
 class EVENT_TYPE(enum.Enum):
     WEBHOOK = 1     # received webhook POST message
@@ -161,6 +170,7 @@ class EVENT_TYPE(enum.Enum):
 #webhook_path = f'/rachio/{uuid.uuid4()}'
 webhook_path = '/rachio.json'       # use for debug
 
+################################################################################
 # set up the web server handler to process the webhook POST messages
 class PostHandler(BaseHTTPRequestHandler):
     def validate(s):
@@ -208,65 +218,86 @@ log.info('Webhook web server listening on %s', local_addr)
 server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
 server_thread.start()
 
+################################################################################
 # install webhooks at Rachio
 webhook_url = public_url + webhook_path
 controller.add_device_zone_run_webhook(webhook_url)
 
+################################################################################
+# set up connection to database
+if (token := config.get('INFLUXDB', 'Token')) is None:
+    token = os.environ.get("INFLUXDB_TOKEN")
+host = "https://us-east-1-1.aws.cloud2.influxdata.com"
+database = "irrigation"
+client = InfluxDBClient3(host=host, token=token, database=database)
+
+################################################################################
 # every night check for leaks over an hour interval, record daily water usage,
 # and test the webhook mechanism
 test_message_received = threading.Event()
-test_path = '/test.json'
-def leak_check():
+def leak_check(test=False):
     while True:
-        # wait until 2300 hours when system will be idle
-        now = datetime.now()
-        target_time = now.replace(hours=23,minutes=0,seconds=0,microseconds=0)
-        if target_time < now:
-            target_time += datetime.timedelta(days=1)
-        time.sleep((target_time - now).seconds)
+        if not test:
+            # wait until 2300 hours when system will be idle
+            now = datetime.datetime.now()
+            target_time = now.replace(hour=23,minute=0,second=0,microsecond=0)
+            if target_time < now:
+                target_time += datetime.timedelta(days=1)
+            delay = (target_time - now).seconds
+            log.debug('leak_check sleeping for %d seconds', delay)
+            time.sleep(delay)
 
         # make two water meter readings one hour apart
         start_reading = water_meter.read_meter(wm_name)
         log.info('First leak test meter reading: %s', pprint.pformat(start_reading))
-        time.sleep(60*60)
+        if not test:
+            time.sleep(60*60)
         end_reading = water_meter.read_meter(wm_name)
         log.info('Second leak test meter reading: %s', pprint.pformat(end_reading))
+        test = False
 
         # check for water usage (leakage)
         start_value = start_reading.get('accumulated', None)
         end_value = end_reading.get('accumulated', None)
-        if start_reading is None:
+        if start_value is None:
             leakage = None
-        elif end_reading is None:
+        elif end_value is None:
             leakage = None
         else:
             leakage = end_value - start_value
+        log.debug('Leakage was %f', leakage)
         if leakage and leakage > 0.1:
             log.error('One hour leakage of %0.3f detected', leakage)
             if topic := config.get('NTFY', 'Topic', fallback=None):
                 requests.post(f'https://ntfy.sh/{topic}',
                     data='Irrigation leak detected'.encode(encoding='utf-8'))
 
-        if end_leakage is not None:
-            # TODO log end meter reading to database
+        if end_value is not None:
+            # TODO send ntfy message of leak
             pass
 
+        # log daily meter reading to database
+        if end_value is not None:
+            point = Point("water_meter").field("reading", end_value)
+            client.write(record=point, write_procesion="s")
+
         # POST test message to public webhook site
-        test_url = public_url + test_path
         headers = {"content-type": "application/json"}
         payload = {"eventType": "WEBHOOK_TEST"}
-        response = requests.post(test_url, json=payload, headers=headers)
+        response = requests.post(webhook_url, json=payload, headers=headers)
         log.debug(response.text)
 
         # wait for indication that test message was received
         if not test_message_received.wait(timeout=10):
             log.error('failed to receive daily test message')
-            # send a ntfy message of the failure
+            # TODO send a ntfy message of the failure
 
 # start up the leak_check in its own thread
-test_thread = threading.Thread(target=leak_check, daemon=True)
+leak_thread = threading.Thread(target=leak_check, args=(True,), daemon=True)
+leak_thread.start()
 
-# process events from queue
+################################################################################
+# process webhook events from queue
 try:
     while True:
         q = event_queue.get()
@@ -316,6 +347,9 @@ try:
                     continue
 
                 # TODO need to log data collected
+                point = Point("usage").tag("zone", str(zoneNumber)).field("usage", usage).field("flow", zone.flow)
+                client.write(record=point, write_procesion="s")
+
                 # time/date, zone, flow, usage, runtime
 
                 # reformat data for logging/messages
