@@ -63,7 +63,7 @@ if 'WATERMETER' not in config.sections():
 wm_name = config['WATERMETER']['name']
 
 ################################################################################
-# check to see if the host is able to determine the IP address of the water meter
+# check to see if the host will be able to determine the IP address of the water meter
 for domain in ('', '.attlocal.net', '.local'):
     wm_path = wm_name + domain
     try:
@@ -73,41 +73,38 @@ for domain in ('', '.attlocal.net', '.local'):
     except:
         pass
 else:
-    # was unable to locate using name lookup in the usual places, so try to find
-    # the water meter's IP address from the MAC address using route and arp-scan system commands
+    # the system was unable to determine the water meter's IP address using the name lookup,
+    # so use arp-scan to dump the address information of all devices on the subnet
+    # and find the water meter's IP address by searching for its MAC address
+
+    # macOS requires arp-scan to run as admin, so check that first
+    # TODO could also change the group_id of the /dev/bpf* devices to staff
+    if 'macOS' in platform.platform() and os.getuid() != 0:
+        exit(f'Error: command needs to run as admin for arp-scan')
+
+    # arp-scan also requires the water meter's MAC address
     if (wm_mac_addr := config.get('WATERMETER', 'MAC', fallback=None)) is None:
         exit(f'''Error:
  Unable to determine the network address of {wm_name} using DNS
  Unable to search using arp-scan as MAC address is missing from configuration''')
+
     log.debug(f'water meter MAC address: {wm_mac_addr}')
 
-    # arp-scan needs the name of the network interface - use route system command
-    network_addr = '192.168.1.0'    # FIXME need to determine programatically
-    if 'macOS' in platform.platform():
-        # arp-scan command on macOS has to run as admin
-        if os.getuid() != 0:
-            exit(f'''Error:
- Unable to determine network address of {wm_name} using DNS
- Rerun command as admin to allow search by MAC address''')
-        paths = subprocess.run(['route', 'get', network_addr], capture_output=True)
-        # extract the interface
-        text = str(paths.stdout, encoding='utf-8').split('\n')
-        for line in text:
-            if 'interface' in line:
-                interface = line.split()[1]
-                break
+    # use netstat to list all of the network interfaces
+    ns = subprocess.run(['netstat', '-rnf', 'inet'], capture_output=True)
+
+    # locate the default interface and extract name of the interface
+    for line in str(ns.stdout, encoding='utf-8').split('\n'):
+        if line.startswith('default') or line.startswith('0.0.0.0'):
+            interface = line.split()[-1]
+            break
     else:
-        paths = subprocess.run(['route'])
-        text = str(paths.stdout, encoding='utf-8').split('\n')
-        # extract the interface
-        for line in text:
-            if network_addr in line:
-                interface = line.split()[-1]
-                break
+        exit("Unable to determine the default network interface using arp-scan")
     log.debug(f'network interface {interface}')
 
-    # use arp-scan to send ARP requests to all IP4 hosts on local network
+    # scan the subnet
     hosts = subprocess.run(['arp-scan', '--localnet', f'--interface={interface}', '--quiet'], capture_output=True)
+
     # locate the target MAC address from the responses
     text = str(hosts.stdout, encoding='utf-8').split('\n')
     for line in text:
@@ -289,8 +286,10 @@ def leak_check(test=False):
         # POST test message to public webhook site
         headers = {"content-type": "application/json"}
         payload = {"eventType": "WEBHOOK_TEST"}
-        response = requests.post(webhook_url, json=payload, headers=headers)
-        log.debug(response.text)
+        try :
+            response = requests.post(webhook_url, json=payload, headers=headers)
+        except:
+            log.error('POST to webhook URL failed')
 
         # send a ntfy message if message not received
         if not test_message_received.wait(timeout=10):
