@@ -3,7 +3,17 @@ As irrigation systems age pipes can break, emitters can fail, and valves can lea
 
 In addition to fault detection, the application will also track water use by zone to a database for later analysis.
 
-The irrigation system is managed by a Rachio irrigation controller, which provides notification of state changes via webhooks. These notifications will be forwarded to the application via an ngrok agent.
+The irrigation system is managed by a Rachio irrigation controller, which provides notification of state changes via webhooks. The application is responsible for setting up and verifying the webhook configuration.
 
-Water use monitored by a TUF-2000B ultrasonic flow meter manufactured by Dalian Taosonics Instrument Co. Registers reporting water usage and flow are available via its RS485 interface, which is bridged to the local network.
+Webhooks notifications from the irrigation controller are forwarded to the application via a ngrok agent running as a separate process.
 
+Water use monitored by a TUF-2000B ultrasonic flow meter manufactured by Dalian Taosonics Instrument Co. Registers reporting water usage and flow are available via its RS485 interface, which is bridged to the local network using an application running on a Raspberry Pi PicoW.
+ 
+Events and data are recorded in a cloud-based influx database. Eventually this needs to more to a more permanent solution, either a locally hosted influx database or the existing Mariadb database.
+
+The config.ini file is used to specify:
+- the Rachio API key and controller name
+- the water meter name and MAC address
+- the influxDB access token
+- the ntfy topic (which defaults to the topic in ~/.ntfy)
+- per-zone flow limits
