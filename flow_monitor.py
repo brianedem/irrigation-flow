@@ -156,7 +156,7 @@ for vid in zone_info:
 #   print(zone_info[vid])
     valve = zone_info[vid]['valve']
     zones[valve] = valve_state(vid, zone_info[vid]['name'])
-    log.info(f'{valve}: {vid} {zone_info[vid]['name']}')
+    log.info('%s: %s %s', valve, vid, zone_info[vid]['name'])
 
 ################################################################################
 # create event queue for webhook and flow measurement callback
