@@ -48,7 +48,7 @@ class rachio():
             if d['name'] == device_name:
                 break
         else:
-            raise Exception(f"Controller {device_device} was not found")
+            raise Exception(f"Controller {device_name} was not found")
         self.device = d
         log.info(f'controller ID: {d['id']}')
 
