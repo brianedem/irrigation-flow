@@ -156,7 +156,7 @@ for vid in zone_info:
 #   print(zone_info[vid])
     valve = zone_info[vid]['valve']
     zones[valve] = valve_state(vid, zone_info[vid]['name'])
-    log.debug('%s: %s %s', valve, vid, zone_info[vid]['name'])
+    log.debug('%d: %s %s', valve, vid, zone_info[vid]['name'])
 
 ################################################################################
 # create event queue for webhook and flow measurement callback
@@ -321,7 +321,7 @@ try:
                 continue
             eventId = data['eventId']
             payload = data['payload']
-            zoneNumber = int(payload['zoneNumber'])
+            zoneNumber = payload['zoneNumber']
             zone = zones[zoneNumber]
 
             # read the water usage meter
