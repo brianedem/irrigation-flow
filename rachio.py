@@ -35,7 +35,7 @@ class rachio():
         try:
             site = '{}/{}'.format(public_rachio, self.userId)
             r = requests.get(site, headers=self.authorization, timeout=5)
-        except requests.exceptions.ReadTimeout:
+        except:
             exit(f'Error: Get request to {site} for person/info timed out')
 
         try:
@@ -95,7 +95,10 @@ class rachio():
             ],
         }
 #       pprint.pp(headers, payload)
-        response = requests.post(site, json=payload, headers=headers)
+        try:
+            response = requests.post(site, json=payload, headers=headers, timeout=5)
+        except:
+            exit('Error while installing webhook at Rachio')
         log.debug(response.text)
 
     def list_webhooks(self):
@@ -104,8 +107,8 @@ class rachio():
             "accept": "application/json",
         }
         try:
-            response = requests.get(url, headers=headers)
-        except requests.exceptions.ReadTimeout:
+            response = requests.get(url, headers=headers, timeout=5)
+        except:
             exit(f'Error: GET request to {url} timed out')
 
         try:

@@ -8,7 +8,7 @@ def read_meter(name):
     try:
         r = requests.get(site, timeout=5)
         r.raise_for_status()
-    except requests.exceptions.RequestException:
+    except:
         log.error('GET %s failed', site)
         return {}
 

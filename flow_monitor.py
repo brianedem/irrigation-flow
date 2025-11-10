@@ -404,7 +404,8 @@ try:
                 continue
             meter_data = water_meter.read_meter(wm_name)
             log.debug(pprint.pformat(meter_data))
-            zone.flow = meter_data['flow']
+            zone.flow = meter_data.get['flow', None]
+            # TODO need to verify zone.flow before using
             flow_limit = config.get('FLOW', 'str(zoneNumber)', fallback=None) 
             if flow_limit and zone.flow > flow_limit:
                 send_notification('Irrigation leak detected')
