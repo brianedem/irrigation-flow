@@ -330,7 +330,7 @@ try:
 
             if zone.valve_open:
                 if "STARTED" in eventType:
-                    log.info('Zone %s START - ignored, valve already open', zone.name)
+                    log.info('Zone %d %s START - ignored, valve already open', zoneNumber, zone.name)
                     continue
                 zone.valve_open = False
 
@@ -368,9 +368,9 @@ try:
 
                 # log the event
                 if "STOPPED" in eventType:    # operator has stopped the zone
-                    log.info('Zone %s stopped - %s, %s', zone.name, usage, flow)
+                    log.info('Zone %d %s stopped - %s, %s', zoneNumber, zone.name, usage, flow)
                 elif "COMPLETED" in eventType:  # zone schedule has run to completion
-                    log.info('Zone %s completed - %s, %s', zone.name, usage, flow)
+                    log.info('Zone %d %s completed - %s, %s', zoneNumber, zone.name, usage, flow)
                 else:
                     log.warning('Unexpected %s', eventType)
 
@@ -380,7 +380,7 @@ try:
 
             else:   # valve is closed
                 if "STARTED" in eventType:
-                    log.debug('Zone %s started', zone.name)
+                    log.debug('Zone %d %s started', zoneNumber, zone.name)
                     zone.valve_open = True
                     zone.meter_start_value = meter_data.get('accumulated', None)
                     zone.startId = eventId
