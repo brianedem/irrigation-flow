@@ -32,11 +32,13 @@ class rachio():
         log.info(f'user ID: {self.userId}')
 
         # use the userId to get all of the other IDs associated with zones, schedules, etc
-        try:
-            site = '{}/{}'.format(public_rachio, self.userId)
-            r = requests.get(site, headers=self.authorization, timeout=5)
-        except:
-            exit(f'Error: Get request to {site} for person/info timed out')
+        for i in range(1,3):
+            try:
+                site = '{}/{}'.format(public_rachio, self.userId)
+                r = requests.get(site, headers=self.authorization, timeout=5)
+                break
+            except:
+                exit(f'Error: Get request to {site} for person/info timed out')
 
         try:
             self.user = r.json()
@@ -52,16 +54,16 @@ class rachio():
         self.device = d
         log.info('controller ID: %s', d['id'])
 
+    # returns dictonary of zone info sorted and indexed by inteter zone number
     def get_zones(self):
-
         zones = {}
         for z in self.device['zones']:
-            _id = z['id']
             if z['enabled']:
-                zones[_id] = {'valve': z['zoneNumber'], 'name': z['name']}
+                zoneNumber = int(z['zoneNumber'])
+                zones[zoneNumber] = {'name': z['name'], 'id': z['id']}
 
         # sort result by zone number
-        return dict(sorted(zones.items(), key=lambda item: item[1]['valve']))
+        return dict(sorted(zones.items()))
 
     # creates webhook for target_url if not present
     def add_device_zone_run_webhook(self, target_url):

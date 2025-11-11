@@ -2,7 +2,7 @@ import argparse
 import configparser
 import logging
 import pprint
-import socket
+import locate_iot
 import platform
 import os
 import subprocess
@@ -57,63 +57,16 @@ config.read('config.ini')
 
 log = logging.getLogger(__name__)
 logging.basicConfig(format='%(asctime)s %(filename)s %(message)s', level=logging.INFO)
-# check that water meter information is in the configuration
-if 'WATERMETER' not in config.sections():
-    exit('WATERMETER section missing from config.ini')
-wm_name = config['WATERMETER']['name']
 
 ################################################################################
 # check to see if the host will be able to determine the IP address of the water meter
-for domain in ('', '.attlocal.net', '.local'):
-    wm_path = wm_name + domain
-    try:
-        socket.gethostbyname(wm_path)
-        wm_name = wm_path
-        break
-    except:
-        pass
-else:
-    # the system was unable to determine the water meter's IP address using the name lookup,
-    # so use arp-scan to dump the address information of all devices on the subnet
-    # and find the water meter's IP address by searching for its MAC address
+if 'WATERMETER' not in config.sections():
+    exit('WATERMETER section missing from config.ini')
+name = config['WATERMETER']['name']
+mac_addr = config.get('WATERMETER', 'MAC', fallback=None)
+wm_name = locate_iot.locate(name, mac_addr)
 
-    # macOS requires arp-scan to run as admin, so check that first
-    # TODO could also change the group_id of the /dev/bpf* devices to staff
-    if 'macOS' in platform.platform() and os.getuid() != 0:
-        exit(f'Error: command needs to run as admin for arp-scan')
-
-    # arp-scan also requires the water meter's MAC address
-    if (wm_mac_addr := config.get('WATERMETER', 'MAC', fallback=None)) is None:
-        exit(f'''Error:
- Unable to determine the network address of {wm_name} using DNS
- Unable to search using arp-scan as MAC address is missing from configuration''')
-
-    log.info('water meter MAC address: %s', wm_mac_addr)
-
-    # use netstat to list all of the network interfaces
-    ns = subprocess.run(['netstat', '-rnf', 'inet'], capture_output=True)
-
-    # locate the default interface and extract name of the interface
-    for line in str(ns.stdout, encoding='utf-8').split('\n'):
-        if line.startswith('default') or line.startswith('0.0.0.0'):
-            interface = line.split()[-1]
-            break
-    else:
-        exit("Unable to determine the default network interface using arp-scan")
-    log.info('network interface %s', interface)
-
-    # scan the subnet
-    hosts = subprocess.run(['arp-scan', '--localnet', f'--interface={interface}', '--quiet'], capture_output=True)
-
-    # locate the target MAC address from the responses
-    text = str(hosts.stdout, encoding='utf-8').split('\n')
-    for line in text:
-        if wm_mac_addr in line:
-            wm_name = line.split()[0]
-            break
-    else:
-        exit(f'Error: unable to determine IP address of water meter {wm_name}')
-log.info('water meter at %s', wm_name)
+log.info('water meter located at %s', wm_name)
 
 ################################################################################
 # verify ngrok tunnel is up and determine the public endpoint url
@@ -121,14 +74,11 @@ try:
     ngrok = requests.get('http://localhost:4040/api/tunnels')
 except requests.exceptions.ConnectionError:
     exit('Error - ngrok agent is not running')
-#print(ngrok.status_code)
-#print(ngrok.text)
-#pprint.pp(ngrok.json())
 tunnel0 = ngrok.json()['tunnels'][0]
 public_url = tunnel0['public_url']
 local_addr = tunnel0['config']['addr']
 local_port = int(local_addr.split(':')[-1])
-#print(public_url)
+log.info('ngrok public endpoint at %s', public_url)
 
 ################################################################################
 # determine the rachio valve mapping
@@ -140,23 +90,23 @@ controller = rachio.rachio(rc['APIkey'], rc['Name'])
 
 ################################################################################
 # set up state variables for each valve
-class valve_state:
-    def __init__(self, valve_id, valve_name):
+class zone_state:
+    def __init__(self, zone_id, zone_name):
         self.valve_open = False
         self.meter_start_value = None
         self.flow_timer = None
         self.flow = None
         self.usage = 0
-        self.id = valve_id
-        self.name = valve_name
+        self.id = zone_id
+        self.name = zone_name
 
 zone_info = controller.get_zones()
 zones = {}
-for vid in zone_info:
-#   print(zone_info[vid])
-    valve = zone_info[vid]['valve']
-    zones[valve] = valve_state(vid, zone_info[vid]['name'])
-    log.debug('%d: %s %s', valve, vid, zone_info[vid]['name'])
+for zone in zone_info:
+    zid = zone_info[zone]['id']
+    zname = zone_info[zone]['name']
+    zones[zone] = zone_state(zid, zname)
+    log.debug('%d: %s %s', zone, zid, zname)
 
 ################################################################################
 # create event queue for webhook and flow measurement callback
@@ -321,7 +271,7 @@ try:
                 continue
             eventId = data['eventId']
             payload = data['payload']
-            zoneNumber = payload['zoneNumber']
+            zoneNumber = int(payload['zoneNumber'])
             zone = zones[zoneNumber]
 
             # read the water usage meter
@@ -390,7 +340,7 @@ try:
                         zone.timer = threading.Timer(20, event_queue.put, args=args)
                         zone.timer.start()
                 else:
-                    log.info('Valve %s is not open - ignoring %s', zone.name, eventType)
+                    log.info('Valve %d %s is not open - ignoring %s', zoneNumber, zone.name, eventType)
 
         elif etype is EVENT_TYPE.FLOW_TIMER:
             # the delay in receiving zone notifications could result in reading the
@@ -404,10 +354,9 @@ try:
                 continue
             meter_data = water_meter.read_meter(wm_name)
             log.debug(pprint.pformat(meter_data))
-            zone.flow = meter_data.get['flow', None]
-            # TODO need to verify zone.flow before using
+            zone.flow = meter_data.get('flow', None)
             flow_limit = config.get('FLOW', 'str(zoneNumber)', fallback=None) 
-            if flow_limit and zone.flow > flow_limit:
+            if zone.flow and flow_limit and zone.flow > flow_limit:
                 send_notification('Irrigation leak detected')
         else:
             log.warning('Unknown event %s', etype)
