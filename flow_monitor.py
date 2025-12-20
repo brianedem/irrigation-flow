@@ -71,7 +71,7 @@ log.info('water meter located at %s', wm_name)
 ################################################################################
 # verify ngrok tunnel is up and determine the public endpoint url
 try:
-    ngrok = requests.get('http://localhost:4040/api/tunnels')
+    ngrok = requests.get('http://rp6.attlocal.net:4040/api/tunnels')
 except requests.exceptions.ConnectionError:
     exit('Error - ngrok agent is not running')
 tunnel0 = ngrok.json()['tunnels'][0]
