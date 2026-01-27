@@ -46,6 +46,7 @@ parser = argparse.ArgumentParser(
                     prog=__name__,
                     description=__doc__)
 parser.add_argument('--leak_test', action='store_true')
+parser.add_argument('--configure', action='store_true')
 args = parser.parse_args()
 
 ################################################################################
@@ -60,13 +61,51 @@ log = logging.getLogger(__name__)
 logging.basicConfig(format='%(asctime)s %(filename)s %(message)s', level=logging.INFO)
 
 ################################################################################
-# The MacOS sometimes has trouble looking up the IP addresses of IOT devices
+# generate a config.ini file if requested
+config_template = '''
+[NGROK]
+ClientHost      .Host name that NGROK Client will connect to
+[RACHIO]
+APIkey          .Key supplied by Rachio website
+Name            .Host name for the irrigation controller
+[WATERMETER]
+Name            .Host name for the watermeter
+MacAddr         .MAC address for watermeter (for MacOS)
+[INFLUXDB]
+Host            .Host name for the InfluxDB server
+Org `           .Organization name 
+Bucket          .Bucket name
+Token           .Token for accessing Bucket
+[NTFY]
+ConfigPath      .Path to the config file containing the NTFY token
+[FLOW]
+'''
+if args.configure:
+    if files_read:
+        exit(f'{config_file} exists')
+    with open(config_file, 'w', encoding='utf-8') as config_fd:
+        for line in config_template.splitlines():
+            if line.strip() == '':
+                continue
+            if line[0]=='[':
+                config_fd.write(line + '\n')
+                print(f'Section {line}')
+                continue
+            item = line.split()[0]
+            item_help = line[line.index('.')+1:]
+            print(item_help)
+            value = input(f'{item} = ')
+            config_fd.write(f'{item} = {value}\n')
+    exit('File creation complete')
+
+################################################################################
+# The MacOS sometimes has trouble looking up IOT IP addresses
 # verify that the system will be able to determine the IP address of the water meter
+section_name = 'WATERMETER'
 try:
-    section_name = 'WATERMETER'
     watermeter_config = config[section_name]
 except KeyError:
-    exit(f'[{section_name}] section missing from {config_file}')
+    exit(f'[{section_name}] section of {config_file} missing')
 try:
     watermeter_name = watermeter_config['Name']
     watermeter_mac_addr = watermeter_config.get('MacAddr', None)
@@ -78,8 +117,8 @@ log.info('water meter located at %s', wm_name)
 
 ################################################################################
 # verify ngrok tunnel is up and determine the public endpoint url
+section_name = 'NGROK'
 try:
-    section_name = 'NGROK'
     ngrok_config = config[section_name]
 except KeyError:
     exit(f'[{section_name}] section of {config_file} missing')
@@ -101,8 +140,8 @@ log.info('ngrok public endpoint at %s', tunnel_public_url)
 
 ################################################################################
 # determine the rachio valve mapping
+section_name = 'RACHIO'
 try:
-    section_name = 'RACHIO'
     rachio_config = config['RACHIO']
 except KeyError:
     exit(f'{section_name} section missing from {config_file}')
@@ -142,23 +181,20 @@ class EVENT_TYPE(enum.Enum):
     WEBHOOK = 1     # received webhook POST message
     FLOW_TIMER = 2  # callback from webhook START message
 
-# create a random string for the webhook path on the server
-#webhook_path = f'/rachio/{uuid.uuid4()}'
-webhook_path = '/rachio.json'       # use for debug
+webhook_path = '/rachio.json'
 
 ################################################################################
 # create a simple web server to receive the webhook POST messages from Rachio
 class PostHandler(BaseHTTPRequestHandler):
     def validate(s):
-        if s.headers['Content-Type'] != 'application/json':
-            return None
         if s.path != webhook_path:
-            return None
-        if 'Content-Length' not in s.headers:
             return None
         try:
             content_length = int(s.headers['Content-Length'])
-        except ValueError:
+            content_type = s.headers['Content-Type']
+            if content_type != 'application/json':
+                return None
+        except:
             return None
 
 #       pprint.pp(dict(s.headers))
@@ -202,8 +238,8 @@ controller.add_device_zone_run_webhook(webhook_url)
 
 ################################################################################
 # set up connection to database
+section_name = 'INFLUXDB'
 try:
-    section_name = 'INFLUXDB'
     influx_config = config[section_name]
 except KeyError:
     exit(f'{section_name} section missing from {config_file}')
@@ -231,7 +267,7 @@ if ntfy_config_path := config.get('NTFY', 'ConfigPath', fallback=None):
 ntfy_topic = config.get('NTFY', 'Token', fallback=None)
 
 def send_notification(message):
-    if ntfy__topic:
+    if ntfy_topic:
         try:
             requests.post(f'https://ntfy.sh/{ntfy_topic}', data=message.encode(encoding='utf-8'))
         except:
@@ -308,21 +344,22 @@ try:
     while True:
         q = event_queue.get()
         log.debug('%s', pprint.pformat(q))
-        etype, data = q
+        etype, edata = q
         if etype is EVENT_TYPE.WEBHOOK:
 
             # decode the message and verify type
-            eventType = data['eventType']
+            eventType = edata['eventType']
             if "WEBHOOK_TEST" in eventType:     # private type to test webhook forwarding
                 test_message_received.set()
                 continue
             if "DEVICE_ZONE_RUN" not in eventType:
                 log.warning(f'ignoring {eventType}')
                 continue
-            eventId = data['eventId']
-            payload = data['payload']
+            eventId = edata['eventId']
+            payload = edata['payload']
             zoneNumber = int(payload['zoneNumber'])
             zone = zones[zoneNumber]
+            zone_name = zone.zone_name
 
             # read the water usage meter
             meter_data = water_meter.read_meter(wm_name)
@@ -353,7 +390,7 @@ try:
                     continue
 
                 # log data collected
-                point = Point("cycle").tag("zone", str(zoneNumber)).field("usage", usage).field("flow", zone.flow)
+                point = Point(zone_name).field("usage", usage).field("flow", zone.flow)
                 influx_write_api.write(bucket='irrigation', record=point)
 
                 # reformat data for logging/messages
@@ -398,7 +435,7 @@ try:
             # zone. This is unlikely as the flow measurement is made 20 seconds into
             # the irrigation cycle, which will probably only occur on the ending
             # cycle of a zone using the 'soak' feature
-            zoneNumber, timerId = data
+            zoneNumber, timerId = edata
             zone = zones[zoneNumber]
             if not zone.valve_open or zone.startId != timerId:
                 continue
