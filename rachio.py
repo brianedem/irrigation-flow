@@ -54,7 +54,7 @@ class rachio():
         self.device = d
         log.info('controller ID: %s', d['id'])
 
-    # returns dictonary of zone info sorted and indexed by inteter zone number
+    # returns dictonary of zone info sorted and indexed by integer zone number
     def get_zones(self):
         zones = {}
         for z in self.device['zones']:

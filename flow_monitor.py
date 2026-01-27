@@ -14,17 +14,16 @@ import enum
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 import threading
-from influxdb_client_3 import InfluxDBClient3, Point
+#from influxdb_client_3 import InfluxDBClient3, Point
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 import datetime
 import time
 import water_meter
 
 # As the webhook mechanism requires a public interface, an additional external mechanism must be set
-# up to forward the notification to a system behind a NAT router. This mechanism could be one of the
-# following:
-# - port forwarding (local router)
-# - network tunnel (local app communicates with edge proxy, such as cloudflare or ngrok)
-# For this implementation ngrok will be used as it requires the minimal amount of configuration.
+# up to forward the notification to a system behind a NAT router.
+# This implementation will use ngrok as it requires a minimal amount of configuration.
 # ngrok can be set up as a background service - see https://ngrok.com/docs/agent#running-ngrok-in-the-background
 
 ################################################################################
@@ -51,42 +50,70 @@ args = parser.parse_args()
 
 ################################################################################
 # read configuration
+config_file = 'config.ini'
 config = configparser.ConfigParser()
-config.read(os.path.expanduser('~/.ntfy'))
-config.read('config.ini')
+files_read = config.read(config_file)
 
+################################################################################
+# set up logging
 log = logging.getLogger(__name__)
 logging.basicConfig(format='%(asctime)s %(filename)s %(message)s', level=logging.INFO)
 
 ################################################################################
-# check to see if the host will be able to determine the IP address of the water meter
-if 'WATERMETER' not in config.sections():
-    exit('WATERMETER section missing from config.ini')
-name = config['WATERMETER']['name']
-mac_addr = config.get('WATERMETER', 'MAC', fallback=None)
-wm_name = locate_iot.locate(name, mac_addr)
+# The MacOS sometimes has trouble looking up the IP addresses of IOT devices
+# verify that the system will be able to determine the IP address of the water meter
+try:
+    section_name = 'WATERMETER'
+    watermeter_config = config[section_name]
+except KeyError:
+    exit(f'[{section_name}] section missing from {config_file}')
+try:
+    watermeter_name = watermeter_config['Name']
+    watermeter_mac_addr = watermeter_config.get('MacAddr', None)
+except KeyError as a:
+    exit(f'Unable to fined {a} in [{section_name}] section of {config_file}')
+wm_name = locate_iot.locate(watermeter_name, watermeter_mac_addr)
 
 log.info('water meter located at %s', wm_name)
 
 ################################################################################
 # verify ngrok tunnel is up and determine the public endpoint url
 try:
-    ngrok = requests.get('http://rp6.attlocal.net:4040/api/tunnels')
+    section_name = 'NGROK'
+    ngrok_config = config[section_name]
+except KeyError:
+    exit(f'[{section_name}] section of {config_file} missing')
+try:
+    ngrok_host = ngrok_config['ClientHost']
+except KeyError as a:
+    exit(f'Unable to find {a} in [{section_name}] section of {config_file}')
+
+try:
+    ngrok = requests.get(f'http://{ngrok_host}:4040/api/tunnels')
 except requests.exceptions.ConnectionError:
     exit('Error - ngrok agent is not running')
+
 tunnel0 = ngrok.json()['tunnels'][0]
-public_url = tunnel0['public_url']
-local_addr = tunnel0['config']['addr']
-local_port = int(local_addr.split(':')[-1])
-log.info('ngrok public endpoint at %s', public_url)
+tunnel_public_url = tunnel0['public_url']
+tunnel_local_addr = tunnel0['config']['addr']
+tunnel_local_port = int(tunnel_local_addr.split(':')[-1])
+log.info('ngrok public endpoint at %s', tunnel_public_url)
 
 ################################################################################
 # determine the rachio valve mapping
-if 'RACHIO' not in config.sections():
-    exit('RACHIO section missing from config.ini')
+try:
+    section_name = 'RACHIO'
+    rachio_config = config['RACHIO']
+except KeyError:
+    exit(f'{section_name} section missing from {config_file}')
 
-rc = config['RACHIO']
-controller = rachio.rachio(rc['APIkey'], rc['Name'])
+try:
+    rachio_api_key = rachio_config['APIkey']
+    rachio_name = rachio_config['Name']
+except KeyError as a:
+    exit(f'Unable to find {a} in [{section_name}] section of {config_file}')
+
+controller = rachio.rachio(rachio_api_key, rachio_name)
 
 ################################################################################
 # set up state variables for each valve
@@ -102,9 +129,9 @@ class zone_state:
 
 zone_info = controller.get_zones()
 zones = {}
-for zone in zone_info:
-    zid = zone_info[zone]['id']
-    zname = zone_info[zone]['name']
+for zone in zone_info:                  # zone is the integer value number
+    zid = zone_info[zone]['id']         # Rachio assigned identifier
+    zname = zone_info[zone]['name']     # user assigned name for the zone
     zones[zone] = zone_state(zid, zname)
     log.debug('%d: %s %s', zone, zid, zname)
 
@@ -120,7 +147,7 @@ class EVENT_TYPE(enum.Enum):
 webhook_path = '/rachio.json'       # use for debug
 
 ################################################################################
-# set up the web server handler to process the webhook POST messages
+# create a simple web server to receive the webhook POST messages from Rachio
 class PostHandler(BaseHTTPRequestHandler):
     def validate(s):
         if s.headers['Content-Type'] != 'application/json':
@@ -155,62 +182,85 @@ class PostHandler(BaseHTTPRequestHandler):
 
         event_queue.put((EVENT_TYPE.WEBHOOK, data))
 
-    # redefine the log functions as they write directly to stderr
+    # redefine the class logging functions to use standard logging rather
+    # than writing directly to stderr
     def log_error(s, format, *args):
         log.error(format, *args)
     def log_message(s, format, *args):  # used by log_request() and log_error()
         log.debug(format, *args)
         
-# start up the web server in a separate thread
-httpd = HTTPServer(('', local_port), PostHandler)
-log.info('Webhook web server listening on %s', local_addr)
+# start the web server in its own thread
+httpd = HTTPServer(('', tunnel_local_port), PostHandler)
+log.info('Webhook web server listening on %s', tunnel_local_addr)
 server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
 server_thread.start()
 
 ################################################################################
 # install webhooks at Rachio
-webhook_url = public_url + webhook_path
+webhook_url = tunnel_public_url + webhook_path
 controller.add_device_zone_run_webhook(webhook_url)
 
 ################################################################################
 # set up connection to database
-if (token := config.get('INFLUXDB', 'Token')) is None:
-    token = os.environ.get("INFLUXDB_TOKEN")
-host = "https://us-east-1-1.aws.cloud2.influxdata.com"
-database = "irrigation"
-client = InfluxDBClient3(host=host, token=token, database=database)
+try:
+    section_name = 'INFLUXDB'
+    influx_config = config[section_name]
+except KeyError:
+    exit(f'{section_name} section missing from {config_file}')
+try:
+    influx_host = influx_config['Host']
+    influx_token = influx_config['Token']
+    influx_org = influx_config['Org']
+    influx_bucket = influx_config['Bucket']
+except KeyError as a:
+    exit(f'Unable to find {a} in [{section_name}] section of {config_file}')
+
+#if (token := influx_config.get('Token', None)) is None:
+#    token = os.environ.get("INFLUXDB_TOKEN")
+#host = "https://us-east-1-1.aws.cloud2.influxdata.com"
+#database = "irrigation"
+#client = InfluxDBClient3(host=host, token=token, database=database)
+influx_client = InfluxDBClient(host=influx_host, token=influx_token, org=influx_org)
+influx_write_api = influx_client.write_api(write_options=SYNCHRONOUS)
 
 ################################################################################
+# Ntfy notification configuration and access routine
+# Ntfy token may be in spearate configuration file
+if ntfy_config_path := config.get('NTFY', 'ConfigPath', fallback=None):
+    config.read(ntfy_config_path)  # pick up the ntfy token in a separate config file
+ntfy_topic = config.get('NTFY', 'Token', fallback=None)
+
 def send_notification(message):
-    if topic := config.get('NTFY', 'Topic', fallback=None):
+    if ntfy__topic:
         try:
-            requests.post(f'https://ntfy.sh/{topic}', data=message.encode(encoding='utf-8'))
+            requests.post(f'https://ntfy.sh/{ntfy_topic}', data=message.encode(encoding='utf-8'))
         except:
             log.error('send_notification() failed')
+
 ################################################################################
 # every night check for leaks over an hour interval, record daily water usage,
 # and test the webhook mechanism
 test_message_received = threading.Event()
-def leak_check(test=False):
+def leak_check(test_mode=False):
     while True:
-        if not test:
+        if not test_mode:
             # wait until 2300 hours when system will be idle
             now = datetime.datetime.now()
             target_time = now.replace(hour=23,minute=0,second=0,microsecond=0)
             if target_time < now:
                 target_time += datetime.timedelta(days=1)
             delay = (target_time - now).seconds
-            log.debug('leak_check sleeping for %d seconds', delay)
+            log.debug('leak_check will start in %d seconds', delay)
             time.sleep(delay)
 
         # make two water meter readings one hour apart
         start_reading = water_meter.read_meter(wm_name)
         log.debug('First leak test meter reading: %s', pprint.pformat(start_reading))
-        if not test:
+        if not test_mode:
             time.sleep(60*60)
         end_reading = water_meter.read_meter(wm_name)
         log.debug('Second leak test meter reading: %s', pprint.pformat(end_reading))
-        test = False
+        test_mode = False
 
         # check for water usage (leakage)
         start_value = start_reading.get('accumulated', None)
@@ -231,7 +281,7 @@ def leak_check(test=False):
         # log daily meter reading to database
         if end_value is not None:
             point = Point("water_meter").field("reading", end_value)
-            client.write(record=point, write_procesion="s")
+            influx_write_api.write(bucket=influx_bucket, record=point, org=influx_org)
 
         # POST test message to public webhook site
         headers = {"content-type": "application/json"}
@@ -242,18 +292,18 @@ def leak_check(test=False):
             log.error('POST to webhook URL failed')
 
         # send notification if the webhook test message is not received
-        if not test_message_received.wait(timeout=10):
+        if test_message_received.wait(timeout=10):
+            test_message_received.clear()
+        else:
             log.error('failed to receive daily test message')
             send_notification('Irrigation webhook test failed')
-        else:
-            test_message_received.clear()
 
 # start up the leak_check in its own thread
 leak_thread = threading.Thread(target=leak_check, args=(args.leak_test,), daemon=True)
 leak_thread.start()
 
 ################################################################################
-# process webhook events from queue
+# process events from queue
 try:
     while True:
         q = event_queue.get()
@@ -303,8 +353,8 @@ try:
                     continue
 
                 # log data collected
-                point = Point("usage").tag("zone", str(zoneNumber)).field("usage", usage).field("flow", zone.flow)
-                client.write(record=point, write_procesion="s")
+                point = Point("cycle").tag("zone", str(zoneNumber)).field("usage", usage).field("flow", zone.flow)
+                influx_write_api.write(bucket='irrigation', record=point)
 
                 # reformat data for logging/messages
                 if usage is None:
