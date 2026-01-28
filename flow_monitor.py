@@ -109,10 +109,10 @@ try:
     watermeter_name = watermeter_config['Name']
     watermeter_mac_addr = watermeter_config.get('MacAddr', None)
 except KeyError as a:
-    exit(f'Unable to fined {a} in [{section_name}] section of {config_file}')
+    exit(f'Unable to find {a} in [{section_name}] section of {config_file}')
 wm_name = locate_iot.locate(watermeter_name, watermeter_mac_addr)
 
-log.info('water meter located at %s', wm_name)
+log.debug('water meter located at %s', wm_name)
 
 ################################################################################
 # verify ngrok tunnel is up and determine the public endpoint url
@@ -135,7 +135,7 @@ tunnel0 = ngrok.json()['tunnels'][0]
 tunnel_public_url = tunnel0['public_url']
 tunnel_local_addr = tunnel0['config']['addr']
 tunnel_local_port = int(tunnel_local_addr.split(':')[-1])
-log.info('ngrok public endpoint at %s', tunnel_public_url)
+log.debug('ngrok public endpoint at %s', tunnel_public_url)
 
 ################################################################################
 # determine the rachio valve mapping
@@ -226,7 +226,7 @@ class PostHandler(BaseHTTPRequestHandler):
         
 # start the web server in its own thread
 httpd = HTTPServer(('', tunnel_local_port), PostHandler)
-log.info('Webhook web server listening on %s', tunnel_local_addr)
+log.debug('Webhook web server listening on %s', tunnel_local_addr)
 server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
 server_thread.start()
 
@@ -255,10 +255,10 @@ influx_write_api = influx_client.write_api(write_options=SYNCHRONOUS)
 
 ################################################################################
 # Ntfy notification configuration and access routine
-# Ntfy token may be in spearate configuration file
-ntfy_topic = config.get('NTFY', 'Topic', fallback=None)
-if ntfy_config_path := config.get('NTFY', 'ConfigPath', fallback=None):
-    config.read(ntfy_config_path)  # pick up the ntfy token in a separate config file
+# Ntfy Topic may be in spearate configuration file
+if config.get('NTFY', 'Topic', fallback=None) is None:
+    if ntfy_config_path := config.get('NTFY', 'ConfigPath', fallback=None):
+        config.read(ntfy_config_path)  # pick up the ntfy Topic in a separate config file
 ntfy_topic = config.get('NTFY', 'Topic', fallback=None)
 
 def send_notification(message):
@@ -400,11 +400,11 @@ try:
 
                 # log the event
                 if "STOPPED" in eventType:    # operator has stopped the zone
-                    log.info('Zone %d %s stopped - %s, %s', zoneNumber, zone.name, usage, flow)
+                    log.debug('Zone %d %s stopped - %s, %s', zoneNumber, zone.name, usage, flow)
                 elif "COMPLETED" in eventType:  # zone schedule has run to completion
-                    log.info('Zone %d %s completed - %s, %s', zoneNumber, zone.name, usage, flow)
+                    log.debug('Zone %d %s completed - %s, %s', zoneNumber, zone.name, usage, flow)
                 else:
-                    log.warning('Unexpected %s', eventType)
+                    log.warning('Received unexpected eventType %s', eventType)
 
                 # reset zone values
                 zone.usage = 0
