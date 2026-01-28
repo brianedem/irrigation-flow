@@ -72,7 +72,7 @@ Name            .Host name for the irrigation controller
 Name            .Host name for the watermeter
 MacAddr         .MAC address for watermeter (for MacOS)
 [INFLUXDB]
-Host            .Host name for the InfluxDB server
+Server          .URL for the InfluxDB server
 Org `           .Organization name 
 Bucket          .Bucket name
 Token           .Token for accessing Bucket
@@ -244,7 +244,7 @@ try:
 except KeyError:
     exit(f'{section_name} section missing from {config_file}')
 try:
-    influx_host = influx_config['Host']
+    influx_server = influx_config['Server']
     influx_token = influx_config['Token']
     influx_org = influx_config['Org']
     influx_bucket = influx_config['Bucket']
@@ -256,7 +256,7 @@ except KeyError as a:
 #host = "https://us-east-1-1.aws.cloud2.influxdata.com"
 #database = "irrigation"
 #client = InfluxDBClient3(host=host, token=token, database=database)
-influx_client = InfluxDBClient(host=influx_host, token=influx_token, org=influx_org)
+influx_client = InfluxDBClient(url=influx_server, token=influx_token, org=influx_org)
 influx_write_api = influx_client.write_api(write_options=SYNCHRONOUS)
 
 ################################################################################
@@ -359,7 +359,7 @@ try:
             payload = edata['payload']
             zoneNumber = int(payload['zoneNumber'])
             zone = zones[zoneNumber]
-            zone_name = zone.zone_name
+            zone_name = zone.name
 
             # read the water usage meter
             meter_data = water_meter.read_meter(wm_name)
