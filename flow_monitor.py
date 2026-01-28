@@ -14,7 +14,6 @@ import enum
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 import threading
-#from influxdb_client_3 import InfluxDBClient3, Point
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 import datetime
@@ -77,7 +76,7 @@ Org `           .Organization name
 Bucket          .Bucket name
 Token           .Token for accessing Bucket
 [NTFY]
-ConfigPath      .Path to the config file containing the NTFY token
+ConfigPath      .Path to the config file containing the NTFY Topic
 [FLOW]
 '''
 if args.configure:
@@ -251,20 +250,16 @@ try:
 except KeyError as a:
     exit(f'Unable to find {a} in [{section_name}] section of {config_file}')
 
-#if (token := influx_config.get('Token', None)) is None:
-#    token = os.environ.get("INFLUXDB_TOKEN")
-#host = "https://us-east-1-1.aws.cloud2.influxdata.com"
-#database = "irrigation"
-#client = InfluxDBClient3(host=host, token=token, database=database)
 influx_client = InfluxDBClient(url=influx_server, token=influx_token, org=influx_org)
 influx_write_api = influx_client.write_api(write_options=SYNCHRONOUS)
 
 ################################################################################
 # Ntfy notification configuration and access routine
 # Ntfy token may be in spearate configuration file
+ntfy_topic = config.get('NTFY', 'Topic', fallback=None)
 if ntfy_config_path := config.get('NTFY', 'ConfigPath', fallback=None):
     config.read(ntfy_config_path)  # pick up the ntfy token in a separate config file
-ntfy_topic = config.get('NTFY', 'Token', fallback=None)
+ntfy_topic = config.get('NTFY', 'Topic', fallback=None)
 
 def send_notification(message):
     if ntfy_topic:
@@ -371,7 +366,7 @@ try:
                     continue
                 zone.valve_open = False
 
-                # eventType is PAUSED/STOPPED/COMPLETED
+                # else eventType must be one of PAUSED/STOPPED/COMPLETED
 
                 # determine water usage - None if any readings failed
                 meter_end_value = meter_data.get('accumulated', None)
