@@ -1,4 +1,6 @@
 *.swp
+*.yml
+venv
 __pycache__
 config.ini
 documentation
