@@ -2,7 +2,6 @@ certifi==2025.10.5
 charset-normalizer==3.4.4
 idna==3.11
 influxdb-client==1.50.0
-influxdb3-python==0.16.0
 pyarrow==22.0.0
 python-dateutil==2.9.0.post0
 reactivex==4.1.0

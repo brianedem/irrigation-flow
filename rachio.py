@@ -1,6 +1,5 @@
 import logging
 import requests
-import json
 # rachio provides an API that allows viewing and modifying the configuration of the
 # irrigation controller, but no direct means to monitor the current state of the valves for
 # polling.
@@ -19,49 +18,57 @@ class rachio():
 
         # all requests require authorization using the APIkey
         self.authorization = {"Authorization": f"Bearer {APIkey}"}
-#       print(self.authorization)
 
         # get a userId associated with the auth token (the account)
         try:
             site = '{}/info'.format(public_rachio)
             r = requests.get(site, headers=self.authorization, timeout=5)
-        except:
-            exit(f'Error: no response from {site} while retrieving public/person/info structure')
-#       print(r.json())
-        self.userId = r.json()['id']
-        log.info(f'user ID: {self.userId}')
+        except requests.exceptions.RequestException as e:
+            exit(f'Error: {e} from {site}')
+
+        try:
+            self.userId = r.json()['id']
+            log.info(f'user ID: {self.userId}')
+        except requests.exceptions.JSONDecodeError:
+            exit(f'Error: JSON decode error while processing response from {site}')
+        except KeyError as e:
+            exit(f'Error: Unable to locate key {e} in JSON response from {site}')
 
         # use the userId to get all of the other IDs associated with zones, schedules, etc
-        for i in range(1,3):
+        for i in range(1,3):    # sometimes the response times out so try multiple times
             try:
                 site = '{}/{}'.format(public_rachio, self.userId)
                 r = requests.get(site, headers=self.authorization, timeout=5)
                 break
-            except:
-                exit(f'Error: Get request to {site} for person/info timed out')
+            except requests.exceptions.RequestException as e:
+                exit(f'Error: {e} from {site}')
 
         try:
             self.user = r.json()
-        except:
-            exit('Data format error in site data structure')
+        except requests.exceptions.JSONDecodeError:
+            exit('Error: JSON decode error while processing rachio public/info response')
 
         # locate the requested device
-        for d in self.user['devices']:
-            if d['name'] == device_name:
-                break
-        else:
-            raise Exception(f"Controller {device_name} was not found")
+        try:
+            for d in self.user['devices']:
+                if d['name'] == device_name:
+                    break
+            else:
+                raise Exception(f"Controller {device_name} was not found")
+        except KeyError as e:
+            exit(f'Error: key error {e} while processing response from {site}')
         self.device = d
         log.info('controller ID: %s', d['id'])
 
     # returns dictonary of zone info sorted and indexed by integer zone number
     def get_zones(self):
         zones = {}
-        for z in self.device['zones']:
-            if z['enabled']:
+        try:
+            for z in self.device['zones']:
                 zoneNumber = int(z['zoneNumber'])
                 zones[zoneNumber] = {'name': z['name'], 'id': z['id']}
-
+        except KeyError as e:
+            exit(f'Error: key {e} not found while extacting zone information in rachio public/info response')
         # sort result by zone number
         return dict(sorted(zones.items()))
 
@@ -96,11 +103,11 @@ class rachio():
                 "DEVICE_ZONE_RUN_COMPLETED_EVENT"
             ],
         }
-#       pprint.pp(headers, payload)
+
         try:
             response = requests.post(site, json=payload, headers=headers, timeout=5)
-        except:
-            exit('Error while installing webhook at Rachio')
+        except requests.exceptions.RequestException as e:
+            exit(f'Error: {e} from {site}')
         log.debug(response.text)
 
     def list_webhooks(self):
@@ -110,13 +117,15 @@ class rachio():
         }
         try:
             response = requests.get(url, headers=headers, timeout=5)
-        except:
-            exit(f'Error: GET request to {url} timed out')
+        except requests.exceptions.RequestException as e:
+            exit(f'Error: {e} from {url}')
 
         try:
             webhooks = response.json()['webhooks']
-        except:
-            exit('Data format error in listWebhooks response data')
+        except requests.exceptions.JSONDecodeError:
+            exit(f'Error: JSON decode error while processing response from {url}')
+        except KeyError as e:
+            exit(f'Error: key {e} not found in JSON response from {url}')
 
         return webhooks
 

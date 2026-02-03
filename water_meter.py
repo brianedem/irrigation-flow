@@ -8,15 +8,14 @@ def read_meter(name):
     try:
         r = requests.get(site, timeout=5)
         r.raise_for_status()
-    except:
-        log.error('GET %s failed', site)
+    except requests.exceptions.RequestException as e:
+        log.error('Error: %s from %s', e, site)
         return {}
 
     try:
         data = r.json()
-    except:
-        log.error('Data format error in response from %s', site)
+    except requests.exceptions.JSONDecodeError:
+        log.error('Error: JSON decode error while processing response from %s', site)
         return {}
 
-#   print(data)
     return data

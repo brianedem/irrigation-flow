@@ -20,7 +20,7 @@ def locate(iot_name, mac_address):
         try:
             socket.gethostbyname(full_iot_name)
             break
-        except:
+        except socket.gaierror:
             pass
     else:
         # the system was unable to determine the IOT device's IP address using the name lookup,
@@ -30,7 +30,7 @@ def locate(iot_name, mac_address):
         # macOS requires arp-scan to run as admin, so check that first
         # TODO could also change the group_id of the /dev/bpf* devices to staff
         if 'macOS' in platform.platform() and os.getuid() != 0:
-            exit(f'Error: command needs to run as admin for arp-scan')
+            exit('Error: command needs to run as admin for arp-scan')
 
         # arp-scan also requires the IOT device's MAC address
         if mac_address is None:

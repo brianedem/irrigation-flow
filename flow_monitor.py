@@ -3,13 +3,9 @@ import configparser
 import logging
 import pprint
 import locate_iot
-import platform
-import os
-import subprocess
 import requests
 import rachio
 import queue
-import uuid
 import enum
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
@@ -28,18 +24,20 @@ import water_meter
 ################################################################################
 # process command line arguments
 app_description = \
-'''This application reports excess irrigation water usage.
+'''This application logs irrigation water usage to a database.
 
-Water flow rates are monitored per zone, and flow rates exceeding the zone
-threshold generate a notification.
+For each irrigation cycle, the zone, cycle duration, flow rate, and water
+used during the cycle is logged to the database.
 
+At the end of each day a one-hour leak test is performed. The leakage amount
+and the water meter reading at the end of the day are logged to the database.
 Water usage while the system is idle will also generate a notification.
 
-Notifications are generated using ntfy, which can be received on a moble phone.
-
 A config.ini file is used to establish network addresses and application keys
-for accessing the irrigation controller, the water meter, and the notification
-service.
+for accessing the irrigation controller and the water meter.
+
+The application relies on the ngrok external service to forward webhook HTTP POST
+requests.
 '''
 parser = argparse.ArgumentParser(
                     prog=__name__,
@@ -57,7 +55,7 @@ files_read = config.read(config_file)
 ################################################################################
 # set up logging
 log = logging.getLogger(__name__)
-logging.basicConfig(format='%(asctime)s %(filename)s %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(filename)s %(message)s', level=logging.INFO)
 
 ################################################################################
 # generate a config.ini file if requested
@@ -73,11 +71,7 @@ MacAddr         .MAC address for watermeter (for MacOS)
 [INFLUXDB]
 Server          .URL for the InfluxDB server
 Org `           .Organization name 
-Bucket          .Bucket name
-Token           .Token for accessing Bucket
-[NTFY]
-ConfigPath      .Path to the config file containing the NTFY Topic
-[FLOW]
+Token           .Token for accessing the 'irrigation' Bucket
 '''
 if args.configure:
     if files_read:
@@ -191,14 +185,16 @@ class PostHandler(BaseHTTPRequestHandler):
         try:
             content_length = int(s.headers['Content-Length'])
             content_type = s.headers['Content-Type']
-            if content_type != 'application/json':
-                return None
-        except:
+        except KeyError:
             return None
 
-#       pprint.pp(dict(s.headers))
+        if content_length > 1000:
+            return None
+        if content_type != 'application/json':
+            return None
+
         post_data = s.rfile.read(content_length)
-#       pprint.pp(post_data)
+
         try:
             data = json.loads(post_data)
         except ValueError:
@@ -246,27 +242,12 @@ try:
     influx_server = influx_config['Server']
     influx_token = influx_config['Token']
     influx_org = influx_config['Org']
-    influx_bucket = influx_config['Bucket']
+    influx_bucket = 'irrigation'
 except KeyError as a:
     exit(f'Unable to find {a} in [{section_name}] section of {config_file}')
 
 influx_client = InfluxDBClient(url=influx_server, token=influx_token, org=influx_org)
 influx_write_api = influx_client.write_api(write_options=SYNCHRONOUS)
-
-################################################################################
-# Ntfy notification configuration and access routine
-# Ntfy Topic may be in spearate configuration file
-if config.get('NTFY', 'Topic', fallback=None) is None:
-    if ntfy_config_path := config.get('NTFY', 'ConfigPath', fallback=None):
-        config.read(ntfy_config_path)  # pick up the ntfy Topic in a separate config file
-ntfy_topic = config.get('NTFY', 'Topic', fallback=None)
-
-def send_notification(message):
-    if ntfy_topic:
-        try:
-            requests.post(f'https://ntfy.sh/{ntfy_topic}', data=message.encode(encoding='utf-8'))
-        except:
-            log.error('send_notification() failed')
 
 ################################################################################
 # every night check for leaks over an hour interval, record daily water usage,
@@ -296,38 +277,35 @@ def leak_check(test_mode=False):
         # check for water usage (leakage)
         start_value = start_reading.get('accumulated', None)
         end_value = end_reading.get('accumulated', None)
-        if start_value is None:
-            leakage = None
-        elif end_value is None:
-            leakage = None
-        else:
+        if start_value and end_value:
             leakage = end_value - start_value
+        else:
+            leakage = None
         log.debug('Leakage was %f', leakage)
 
-        # send ntfy message of leak
+        # log the leak
         if leakage and leakage > 0.1:
-            log.error('One hour leakage of %0.3f detected', leakage)
-            send_notification('Irrigation leak detected')
+            log.warning('One hour leakage of %0.3f cf detected', leakage)
 
-        # log daily meter reading to database
+        # log daily meter reading and leakage to database
         if end_value is not None:
             point = Point("water_meter").field("reading", end_value)
+            point.field("leakage", leakage)
             influx_write_api.write(bucket=influx_bucket, record=point, org=influx_org)
 
-        # POST test message to public webhook site
+        # send a POST test message to public webhook site
         headers = {"content-type": "application/json"}
         payload = {"eventType": "WEBHOOK_TEST"}
         try :
-            response = requests.post(webhook_url, json=payload, headers=headers)
-        except:
-            log.error('POST to webhook URL failed')
+            requests.post(webhook_url, json=payload, headers=headers)
+        except requests.exceptions.RequestException as e:
+            log.error('POST to webhook URL failed with %s', e)
 
-        # send notification if the webhook test message is not received
+        # log failure if the webhook test message is not received
         if test_message_received.wait(timeout=10):
             test_message_received.clear()
         else:
-            log.error('failed to receive daily test message')
-            send_notification('Irrigation webhook test failed')
+            log.error('failed to receive daily webhook test message')
 
 # start up the leak_check in its own thread
 leak_thread = threading.Thread(target=leak_check, args=(args.leak_test,), daemon=True)
@@ -343,18 +321,33 @@ try:
         if etype is EVENT_TYPE.WEBHOOK:
 
             # decode the message and verify type
-            eventType = edata['eventType']
+            try:
+                eventId = edata['eventId']
+                eventType = edata['eventType']
+                payload = edata['payload']
+            except KeyError as e:
+                log.warning('Problem extracting %s from webhook POST response', e)
+                continue
+
             if "WEBHOOK_TEST" in eventType:     # private type to test webhook forwarding
                 test_message_received.set()
                 continue
             if "DEVICE_ZONE_RUN" not in eventType:
                 log.warning(f'ignoring {eventType}')
                 continue
-            eventId = edata['eventId']
-            payload = edata['payload']
-            zoneNumber = int(payload['zoneNumber'])
-            zone = zones[zoneNumber]
-            zone_name = zone.name
+
+            try:
+                duration = int(payload['durationSeconds'])
+                zoneNumber = int(payload['zoneNumber'])
+            except KeyError as e:
+                log.warning('Problem extracting %s from webhook POST response', e)
+                continue
+
+            try:
+                zone = zones[zoneNumber]            # zoneNumber could be out of range
+            except KeyError as e:
+                log.warning('Processing webhook: Zone %s is not an active zone', e)
+                continue
 
             # read the water usage meter
             meter_data = water_meter.read_meter(wm_name)
@@ -385,7 +378,7 @@ try:
                     continue
 
                 # log data collected
-                point = Point(zone_name).field("usage", usage).field("flow", zone.flow)
+                point = Point(zone.name).field("usage", usage).field("flow", zone.flow)
                 influx_write_api.write(bucket='irrigation', record=point)
 
                 # reformat data for logging/messages
@@ -437,9 +430,6 @@ try:
             meter_data = water_meter.read_meter(wm_name)
             log.debug(pprint.pformat(meter_data))
             zone.flow = meter_data.get('flow', None)
-            flow_limit = config.get('FLOW', 'str(zoneNumber)', fallback=None) 
-            if zone.flow and flow_limit and zone.flow > flow_limit:
-                send_notification('Irrigation leak detected')
         else:
             log.warning('Unknown event %s', etype)
 
