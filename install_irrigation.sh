@@ -46,7 +46,7 @@ cp ${SOURCE_FILES} ${INSTALL_DIR}/
 # Copy configuration file
 echo -e "${YELLOW}Copying ${CONFIG_FILE}...${NC}"
 if [ -f "${CONFIG_FILE}" ]; then
-    cp "${CONFIG_FILE}" "{CONFIG_DIR}"/
+    cp ${CONFIG_FILE} ${CONFIG_DIR}/
 else
     echo -e "${RED}Warning: ${CONFIG_FILE} not found in current directory${NC}"
     echo "Please create file and manually copy to ${CONFIG_DIR}/${CONFIG_FILE}"
