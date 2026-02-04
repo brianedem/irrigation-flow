@@ -295,7 +295,7 @@ def leak_check(test_mode=False):
 
         # send a POST test message to public webhook site
         headers = {"content-type": "application/json"}
-        payload = {"eventType": "WEBHOOK_TEST"}
+        payload = {"eventType": "WEBHOOK_TEST", 'eventID':None, 'payload':None}
         try :
             requests.post(webhook_url, json=payload, headers=headers)
         except requests.exceptions.RequestException as e:
@@ -378,7 +378,7 @@ try:
                     continue
 
                 # log data collected
-                point = Point(zone.name).field("usage", usage).field("flow", zone.flow)
+                point = Point(zone.name).field("usage", usage).field("flow", zone.flow).field("duration", duration)
                 influx_write_api.write(bucket='irrigation', record=point)
 
                 # reformat data for logging/messages
