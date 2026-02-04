@@ -33,8 +33,10 @@ At the end of each day a one-hour leak test is performed. The leakage amount
 and the water meter reading at the end of the day are logged to the database.
 Water usage while the system is idle will also generate a notification.
 
-A config.ini file is used to establish network addresses and application keys
-for accessing the irrigation controller and the water meter.
+A irrigation.ini file is used to establish network addresses and application keys
+for accessing the irrigation controller and the water meter. An irrigation.ini
+file can be created with 'python flow_monitor.py --configure'. An irrigation.ini
+file in the local directory has precidence over /usr/local/etc/irrigation.ini
 
 The application relies on the ngrok external service to forward webhook HTTP POST
 requests.
@@ -48,9 +50,14 @@ args = parser.parse_args()
 
 ################################################################################
 # read configuration
-config_file = 'config.ini'
+local_config_file = 'irrigation.ini'
+system_config_file = '/usr/local/etc/irrigation.ini'
 config = configparser.ConfigParser()
-files_read = config.read(config_file)
+for config_file in (local_config_file, system_config_file):
+    if file_read := config.read(config_file):
+        break
+else:
+    exit("Error: no configuration file found")
 
 ################################################################################
 # set up logging
@@ -58,7 +65,7 @@ log = logging.getLogger(__name__)
 logging.basicConfig(format='%(filename)s %(message)s', level=logging.INFO)
 
 ################################################################################
-# generate a config.ini file if requested
+# generate a configuration file if requested
 config_template = '''
 [NGROK]
 ClientHost      .Host name that NGROK Client will connect to
@@ -74,9 +81,9 @@ Org `           .Organization name
 Token           .Token for accessing the 'irrigation' Bucket
 '''
 if args.configure:
-    if files_read:
-        exit(f'{config_file} exists')
-    with open(config_file, 'w', encoding='utf-8') as config_fd:
+    if file_read==local_config_file:
+        exit(f'{local_config_file} exists')
+    with open(local_config_file, 'w', encoding='utf-8') as config_fd:
         for line in config_template.splitlines():
             if line.strip() == '':
                 continue

@@ -5,8 +5,9 @@ set -e
 SERVICE_NAME="irrigation"
 SERVICE_USER="irrigation"
 INSTALL_DIR="/opt/${SERVICE_NAME}"
-SOURCE_DIR=$PWD
-SOURCE_FILES="flow_monitor.py locate_iot.py rachio.py water_meter.py"
+SOURCE_FILES="flow_monitor.py locate_iot.py rachio.py water_meter.py requirements.txt"
+CONFIG_FILE="irrigation.ini"
+CONFIG_DIR="/usr/local/etc"
 PYTHON_SCRIPT="flow_monitor.py"
 REQUIREMENTS_FILE="requirements.txt"
 PYTHON_VERSION="python3"
@@ -42,6 +43,15 @@ mkdir -p ${INSTALL_DIR}
 echo -e "${YELLOW}Copying application files...${NC}"
 cp ${SOURCE_FILES} ${INSTALL_DIR}/
 
+# Copy configuration file
+echo -e "${YELLOW}Copying ${CONFIG_FILE}...${NC}"
+if [ -f "${CONFIG_FILE}" ]; then
+    cp "${CONFIG_FILE}" "{CONFIG_DIR}"/
+else
+    echo -e "${RED}Warning: ${CONFIG_FILE} not found in current directory${NC}"
+    echo "Please create file and manually copy to ${CONFIG_DIR}/${CONFIG_FILE}"
+fi
+
 cd ${INSTALL_DIR}
 
 # Create virtual environment
@@ -50,9 +60,8 @@ ${PYTHON_VERSION} -m venv venv
 source venv/bin/activate
 
 # Install Python dependencies
-if [ -f "${SOURCE_DIR}/${REQUIREMENTS_FILE}" ]; then
+if [ -f "${REQUIREMENTS_FILE}" ]; then
     echo -e "${YELLOW}Installing Python dependencies...${NC}"
-    cp ${SOURCE_DIR}/${REQUIREMENTS_FILE} ${INSTALL_DIR}/
     pip install --upgrade pip
     pip install -r ${REQUIREMENTS_FILE}
 else
