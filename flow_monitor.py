@@ -302,7 +302,7 @@ def leak_check(test_mode=False):
 
         # send a POST test message to public webhook site
         headers = {"content-type": "application/json"}
-        payload = {"eventType": "WEBHOOK_TEST", 'eventID':None, 'payload':None}
+        payload = {"eventType": "WEBHOOK_TEST", 'eventId':None, 'payload':None}
         try :
             requests.post(webhook_url, json=payload, headers=headers)
         except requests.exceptions.RequestException as e:
